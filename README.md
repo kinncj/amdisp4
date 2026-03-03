@@ -1,38 +1,37 @@
-# amdisp4 — AMD ISP4 Webcam Fix for CachyOS
+# amdisp4 — AMD ISP4 Suspend/Resume Fix for CachyOS
 
-Out-of-tree DKMS module that fixes the AMD ISP4 (Image Signal Processor v4.1.1) webcam on CachyOS Linux. Tested on the HP ZBook Ultra G1a with AMD Ryzen AI MAX+ PRO 395 (Strix Halo).
+Out-of-tree module that fixes the AMD ISP4 (Image Signal Processor v4.1.1) suspend/resume hang on CachyOS Linux. Tested on the HP ZBook Ultra G1a with AMD Ryzen AI MAX+ PRO 395 (Strix Halo).
 
 Forked from [idovitz/amdisp4](https://github.com/idovitz/amdisp4), which provides the original patches from the [upstream ISP4 patchset](https://lore.kernel.org/lkml/20251128091929.165272-1-Bin.Du@amd.com/).
 
 ## What This Fixes
 
-The in-tree `amd_isp4_capture` module shipped with CachyOS 6.19 is broken:
+The in-tree `amd_isp4_capture` module shipped with CachyOS 6.19 works — the camera streams video. But if the module has been loaded at any point during your session, closing the laptop lid (s2idle suspend) hangs the system. Hard power-off required.
 
-1. **Camera doesn't stream** — attempts to capture from `/dev/video0` fail
-2. **Suspend hangs the system** — if the ISP module has been loaded, closing the lid (s2idle) causes the machine to freeze
+The in-tree driver has **no PM suspend/resume ops**. When the system enters s2idle, the ISP hardware is left in an undefined state and the SMU can't sequence the power domains on resume. This is also missing from the latest [upstream v9 patchset](https://lkml.org/lkml/2026/3/2/278) on LKML.
 
-This module replaces the in-tree version and fixes both issues.
+This module adds `isp4_capture_suspend()` / `isp4_capture_resume()` — ~50 lines that tear down the ISP firmware and hardware state before sleep via `isp4sd_pwroff_and_deinit()`, preventing the SMU hang.
 
 ## What We Changed
 
-The source files are from the in-tree ISP4 driver at `drivers/media/platform/amd/isp4/`, adapted for out-of-tree building:
+The source is identical to the CachyOS in-tree ISP4 driver at `drivers/media/platform/amd/isp4/`, with two additions:
 
-- **API replacement** — internal `amdgpu_bo_*` functions replaced with exported `isp_kernel_buffer_alloc/free` and `isp_user_buffer_alloc/free` from `<drm/amd/isp.h>`
-- **`IRQF_NO_AUTOEN`** — IRQs registered with auto-enable disabled, preventing an interrupt storm during probe
-- **PM suspend/resume ops** — `isp4_capture_suspend()` tears down ISP firmware and hardware state before sleep via `isp4sd_pwroff_and_deinit()`, preventing the SMU hang on resume
-- **Removed files not needed out-of-tree** — `isp4_hw.c/h` and `isp4_phy.c/h` are handled by the kernel's ISP IP block layer
+- **PM suspend/resume ops** (`dev_pm_ops`) — `isp4_capture_suspend()` checks if the ISP is powered on, tears down firmware and hardware state via `isp4sd_pwroff_and_deinit()`, and marks the device for re-open on resume
+- **Out-of-tree API adaptation** — internal `amdgpu_bo_*` functions replaced with exported `isp_kernel_buffer_alloc/free` and `isp_user_buffer_alloc/free` from `<drm/amd/isp.h>`, enabling building outside the kernel tree
 
-The kernel's DRM/AMDGPU ISP layer already handles firmware loading, MIPI PHY configuration, sensor enumeration, and power domain management. This module only needs to talk to the firmware via ring buffers and expose `/dev/video0`.
+Everything else — IRQ handling (`IRQF_NO_AUTOEN`), the V4L2 subdev, video node, firmware interface — is unchanged from the in-tree version.
+
+The module installs to `/updates/dkms/` which automatically overrides the in-tree version.
 
 ## Quick Install (Pre-built Module)
+
+A pre-built `amd_capture.ko.zst` is included for **CachyOS 6.19.5-3-cachyos**:
 
 ```bash
 sudo cp amd_capture.ko.zst /lib/modules/$(uname -r)/updates/dkms/
 sudo depmod
 sudo reboot
 ```
-
-The module installs to `/updates/dkms/` which automatically overrides the broken in-tree version.
 
 ## Building From Source
 
@@ -95,4 +94,4 @@ The module must be rebuilt for each kernel update. Either rebuild manually or se
 
 ## License
 
-Same as the upstream Linux kernel ISP4 driver.
+GPL-2.0 — same as the upstream Linux kernel ISP4 driver.
