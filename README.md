@@ -92,6 +92,68 @@ sudo pacman -S linux-cachyos linux-cachyos-headers
 
 The module must be rebuilt for each kernel update. Either rebuild manually or set up DKMS using the included `dkms.conf` and `Makefile`.
 
+## Technical Details
+
+### The Problem
+
+On the HP ZBook Ultra G1a (Ryzen AI MAX+ PRO 395, Strix Halo), the ISP4 V4L2 media driver (`amd_isp4_capture`) works for camera streaming. But if the module has been loaded at any point during the session, s2idle suspend hangs the system. The machine never wakes and requires a hard power-off.
+
+This affects the CachyOS 6.19.5-3-cachyos kernel and the upstream v9 patchset has the same gap — there are no `dev_pm_ops` on the platform driver.
+
+### The Fix
+
+`isp4_capture_suspend()` and `isp4_capture_resume()` were added to `isp4.c`. The suspend callback checks if the ISP is powered on and tears down the firmware/hardware state before sleep:
+
+```c
+static int isp4_capture_suspend(struct device *dev)
+{
+    struct isp4_device *isp_dev = dev_get_drvdata(dev);
+    struct isp4_subdev *isp_subdev;
+    struct isp4_interface *ispif;
+    int ret;
+
+    if (!isp_dev)
+        return 0;
+
+    isp_subdev = &isp_dev->isp_subdev;
+    ispif = &isp_subdev->ispif;
+
+    if (ispif->status == ISP4IF_STATUS_PWR_OFF)
+        return 0;
+
+    ret = isp4sd_pwroff_and_deinit(&isp_subdev->sdev);
+    if (ret)
+        dev_err(dev, "ISP4 suspend: teardown failed (%d)\n", ret);
+
+    isp_dev->was_powered_before_suspend = true;
+    return 0;
+}
+
+static int isp4_capture_resume(struct device *dev)
+{
+    struct isp4_device *isp_dev = dev_get_drvdata(dev);
+
+    if (!isp_dev)
+        return 0;
+
+    if (isp_dev->was_powered_before_suspend) {
+        isp_dev->was_powered_before_suspend = false;
+    }
+
+    return 0;
+}
+
+static const struct dev_pm_ops isp4_capture_pm_ops = {
+    SET_SYSTEM_SLEEP_PM_OPS(isp4_capture_suspend, isp4_capture_resume)
+};
+```
+
+`.pm = &isp4_capture_pm_ops` was added to the `platform_driver` struct, and a `bool was_powered_before_suspend` field was added to `struct isp4_device`.
+
+That's the entire change — the rest of the driver is identical to what's in the CachyOS 6.19 kernel (based on the upstream v8 patchset).
+
+After resume, userspace needs to re-open the camera device, which triggers `isp4sd_pwron_and_init()` naturally.
+
 ## License
 
 GPL-2.0 — same as the upstream Linux kernel ISP4 driver.
